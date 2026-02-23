@@ -218,14 +218,24 @@ function updateVisibleLayers(skipFit) {
 map.on('zoomend', ()=>{ updateVisibleLayers(true); });
 
 async function renderGeo() {
-  const sources = await loadGeo();
-  await loadVisits();
-  populateYearFilter(VISITS_DATA || {});
+  // 并行加载 geo 和 visits
+  const [sources, visits] = await Promise.all([
+    loadGeo(),
+    loadVisits()
+  ]);
+
+  populateYearFilter(visits || {});
   populateCountryFilter(sources);
+
   // Remove any previous layers
   if (geoLayer) { geoLayer.remove(); geoLayer = null; }
+
   // Clear existing country layers
-  for (const k of Object.keys(countryLayers)) { if (countryLayers[k]) { countryLayers[k].remove(); } delete countryLayers[k]; }
+  for (const k of Object.keys(countryLayers)) {
+    if (countryLayers[k]) countryLayers[k].remove();
+    delete countryLayers[k];
+  }
+
   // Clear municipality->pref mapping
   for (const k of Object.keys(municipalityToPrefecture)) delete municipalityToPrefecture[k];
   visitedPrefectures.clear();
@@ -233,25 +243,35 @@ async function renderGeo() {
   for (const s of sources) {
     // Prefecture layers are tagged with id ending in '_pref'
     if (s.id && s.id.endsWith('_pref')) {
-      const layer = L.geoJSON(s.geojson, { style: stylePrefectureFeature, onEachFeature }).addTo(map);
+      const layer = L.geoJSON(s.geojson, {
+        style: stylePrefectureFeature,
+        onEachFeature
+      }).addTo(map);
       countryLayers[s.id] = layer;
     } else {
-      const layer = L.geoJSON(s.geojson, { style: styleFeature, onEachFeature }).addTo(map);
+      const layer = L.geoJSON(s.geojson, {
+        style: styleFeature,
+        onEachFeature
+      }).addTo(map);
       countryLayers[s.id] = layer;
-      // If this is JP municipalities, build municipality->prefecture mapping
+
+      // JP municipality -> prefecture mapping
       if (s.id === 'jp' && s.geojson && Array.isArray(s.geojson.features)) {
         for (const f of s.geojson.features) {
           const mid = getFeatureId(f.properties || {});
-          const pref = (f.properties && (f.properties.N03_001 || f.properties.N03_003 || f.properties.prefecture || f.properties.name)) || null;
+          const pref =
+            (f.properties &&
+              (f.properties.N03_001 ||
+               f.properties.N03_003 ||
+               f.properties.prefecture ||
+               f.properties.name)) || null;
           if (mid && pref) municipalityToPrefecture[mid] = pref;
         }
       }
     }
   }
-
   // Compute prefecture-level visited state from municipality visits
   recomputeVisitedPrefectures();
-
   updateVisibleLayers();
 }
 
@@ -304,6 +324,8 @@ function styleFeature(feature) {
   };
 }
 
+let currentHighlightedLayer = null;
+
 function onEachFeature(feature, layer) {
   layer.on({
     mouseover(e) { highlightFeature(e); },
@@ -314,6 +336,20 @@ function onEachFeature(feature, layer) {
 
 function highlightFeature(e) {
   const layer = e.target;
+  // If another layer is currently highlighted, reset it first to avoid stale highlights
+  if (currentHighlightedLayer && currentHighlightedLayer !== layer) {
+    const p = currentHighlightedLayer.feature && currentHighlightedLayer.feature.properties;
+    const cid = p && p._country;
+    if (cid && countryLayers[cid] && countryLayers[cid].resetStyle) {
+      countryLayers[cid].resetStyle(currentHighlightedLayer);
+    } else {
+      if (p && p._layerType === 'prefecture') currentHighlightedLayer.setStyle(stylePrefectureFeature(currentHighlightedLayer.feature));
+      else currentHighlightedLayer.setStyle(styleFeature(currentHighlightedLayer.feature));
+    }
+    if (currentHighlightedLayer.closeTooltip) currentHighlightedLayer.closeTooltip();
+  }
+  
+  currentHighlightedLayer = layer;
   // stronger border and visible fill highlight; bring to front for visibility
   layer.setStyle({ weight: 2, fillOpacity: 0.8 });
   if (layer.bringToFront) layer.bringToFront();
@@ -353,16 +389,20 @@ function highlightFeature(e) {
 
 function resetHighlight(e) {
   const layer = e.target;
-  const p = layer.feature && layer.feature.properties;
-  const cid = p && p._country;
-  if (cid && countryLayers[cid] && countryLayers[cid].resetStyle) {
-    countryLayers[cid].resetStyle(layer);
-  } else {
-    // fallback: attempt to set style based on feature again
-    if (p && p._layerType === 'prefecture') layer.setStyle(stylePrefectureFeature(layer.feature));
-    else layer.setStyle(styleFeature(layer.feature));
+  // Only reset if this is the currently highlighted layer (avoid interfering with rapid movements)
+  if (currentHighlightedLayer === layer) {
+    const p = layer.feature && layer.feature.properties;
+    const cid = p && p._country;
+    if (cid && countryLayers[cid] && countryLayers[cid].resetStyle) {
+      countryLayers[cid].resetStyle(layer);
+    } else {
+      // fallback: attempt to set style based on feature again
+      if (p && p._layerType === 'prefecture') layer.setStyle(stylePrefectureFeature(layer.feature));
+      else layer.setStyle(styleFeature(layer.feature));
+    }
+    layer.closeTooltip();
+    currentHighlightedLayer = null;
   }
-  layer.closeTooltip();
 }
 
 function zoomToFeature(e) {

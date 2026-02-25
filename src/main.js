@@ -44,11 +44,21 @@ function populateYearFilter(visits) {
 }
 
 async function loadGeo() {
+  // Attempt to load an optional manifest for available geo sources. The manifest should be an array of objects like:
+  // [{"id":"jp","name":"日本","file":"jp_municipalities.topojson"}, {"id":"cn","name":"中国","file":"cn_municipalities.topojson"}]
+  let sources = null;
+  try {
+    const mr = await fetch('geojson/manifest.json');
+    if (mr.ok) sources = await mr.json();
+  } catch(e) {
+    // manifest optional - ignore errors
+  }
   // Fallback built-in candidates (tries jp and cn automatically)
   const fallback = [
     {id:'jp', name:'日本', file:'geojson/jp_municipalities.topojson'},
     {id:'cn', name:'中国', file:'geojson/cn_municipalities.topojson'}
   ];
+  const tried = sources && Array.isArray(sources) ? sources.map(s => ({id:s.id||s.name, name:s.name||s.id, file:'geojson/'+(s.file||s.path||s.file)})) : fallback;
 
   const fetchAndConvert = async (s) => {
     try {
@@ -77,21 +87,8 @@ async function loadGeo() {
     return null;
   };
 
-  // Load manifest asynchronously for available geo sources (in parallel, not blocking fallback)
-  // The manifest should be an array of objects like:
-  // [{"id":"jp","name":"日本","file":"jp_municipalities.topojson"}, {"id":"cn","name":"中国","file":"cn_municipalities.topojson"}]
-  const manifestPromise = (async () => {
-    try {
-      const mr = await fetch('geojson/manifest.json');
-      if (mr.ok) return await mr.json();
-    } catch(e) {
-      // manifest optional - ignore errors
-    }
-    return null;
-  })();
-
-  // Start loading fallback geo files immediately in parallel
-  const fallbackSourcePromises = fallback.map(s => fetchAndConvert(s));
+  // Kick off all top-level source fetches in parallel
+  const sourcePromises = tried.map(s => fetchAndConvert(s));
 
   // Also attempt to fetch JP prefecture topojson in parallel (optional)
   const prefPromise = (async () => {
@@ -117,15 +114,7 @@ async function loadGeo() {
     return null;
   })();
 
-  // Wait for manifest to decide which sources to use
-  const manifestData = await manifestPromise;
-  const tried = manifestData && Array.isArray(manifestData) ? manifestData.map(s => ({id:s.id||s.name, name:s.name||s.id, file:'geojson/'+(s.file||s.path||s.file)})) : fallback;
-
-  // Kick off any additional (manifest-based) source fetches
-  const additionalSourcePromises = manifestData && Array.isArray(manifestData) ? tried.filter(s => !fallback.some(f => f.id === s.id)).map(s => fetchAndConvert(s)) : [];
-
-  // Collect all results (fallback + additional + prefecture)
-  const results = await Promise.all([...fallbackSourcePromises, ...additionalSourcePromises, prefPromise]);
+  const results = await Promise.all([...sourcePromises, prefPromise]);
   const found = results.filter(r => r);
   if (found.length === 0) throw new Error('No geojson/topojson found (looked for manifest or known files)');
   return found;
